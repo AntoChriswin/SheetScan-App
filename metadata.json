@@ -1,0 +1,6 @@
+{
+  "name": "SheetScan",
+  "description": "Barcode-entry application for Google Sheets",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
