@@ -160,38 +160,85 @@ export class BarcodeScannerService {
       return null;
     };
 
-    // Ensure we are working with a canvas
-    const canvas = document.createElement('canvas');
-    canvas.width = source.width;
-    canvas.height = source.height;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) throw new Error('Could not create canvas context');
-    ctx.drawImage(source, 0, 0);
-
-    // Variant A: Original
-    this.updateDebug({ variant: 'Original' });
-    let result = await attempt(canvas);
-    if (result) return result;
-
-    // Variant B: Grayscale & Contrast
-    this.updateDebug({ variant: 'Grayscale & Contrast' });
-    this.applyContrast(ctx, canvas.width, canvas.height);
-    result = await attempt(canvas);
-    if (result) return result;
+    const getCanvas = (src: HTMLImageElement | HTMLCanvasElement, cropY = 0, cropH = 1): HTMLCanvasElement => {
+      const c = document.createElement('canvas');
+      // If it's an Image, use natural dimensions. If Canvas, use width/height.
+      const w = src instanceof HTMLImageElement ? src.naturalWidth : src.width;
+      const h = src instanceof HTMLImageElement ? src.naturalHeight : src.height;
+      
+      c.width = w;
+      c.height = h * cropH;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        ctx.drawImage(src, 0, h * cropY, w, h * cropH, 0, 0, c.width, c.height);
+      }
+      return c;
+    }
     
-    // Variant C: Upscaled (1.5x)
-    this.updateDebug({ variant: 'Upscaled (1.5x)' });
-    const scaleCanvas = document.createElement('canvas');
-    scaleCanvas.width = source.width * 1.5;
-    scaleCanvas.height = source.height * 1.5;
-    const scaleCtx = scaleCanvas.getContext('2d');
-    if (scaleCtx) {
-       scaleCtx.drawImage(source, 0, 0, source.width, source.height, 0, 0, scaleCanvas.width, scaleCanvas.height);
-       result = await attempt(scaleCanvas);
-       if (result) return result;
+    const baseCanvas = getCanvas(source);
+    
+    // Create bands
+    const canvases = [
+       { name: 'Full', canvas: baseCanvas },
+       { name: 'Center Band', canvas: getCanvas(source, 0.25, 0.5) },
+       { name: 'Upper Band', canvas: getCanvas(source, 0, 0.5) },
+       { name: 'Lower Band', canvas: getCanvas(source, 0.5, 0.5) }
+    ];
+
+    for (const region of canvases) {
+      // Variant 1: Raw
+      this.updateDebug({ variant: `${region.name} - Raw` });
+      let result = await attempt(region.canvas);
+      if (result) return result;
+
+      // Variant 2: Grayscale
+      this.updateDebug({ variant: `${region.name} - Grayscale` });
+      const grayCtx = region.canvas.getContext('2d', { willReadFrequently: true });
+      if (grayCtx) this.applyGrayscale(grayCtx, region.canvas.width, region.canvas.height);
+      result = await attempt(region.canvas);
+      if (result) return result;
+
+      // Variant 3: Contrast Enhancement
+      this.updateDebug({ variant: `${region.name} - Contrast` });
+      if (grayCtx) this.applyContrast(grayCtx, region.canvas.width, region.canvas.height);
+      result = await attempt(region.canvas);
+      if (result) return result;
+      
+      // Variant 4: Mild Sharpening
+      this.updateDebug({ variant: `${region.name} - Sharpened` });
+      if (grayCtx) this.applySharpen(grayCtx, region.canvas.width, region.canvas.height);
+      result = await attempt(region.canvas);
+      if (result) return result;
+
+      // Variant 5: 2x Upscaled
+      this.updateDebug({ variant: `${region.name} - Upscaled 2x` });
+      const scaleCanvas = document.createElement('canvas');
+      scaleCanvas.width = region.canvas.width * 2;
+      scaleCanvas.height = region.canvas.height * 2;
+      const scaleCtx = scaleCanvas.getContext('2d');
+      if (scaleCtx) {
+         scaleCtx.drawImage(region.canvas, 0, 0, region.canvas.width, region.canvas.height, 0, 0, scaleCanvas.width, scaleCanvas.height);
+         result = await attempt(scaleCanvas);
+         if (result) return result;
+         
+         this.updateDebug({ variant: `${region.name} - Upscaled 2x + Contrast` });
+         this.applyContrast(scaleCtx, scaleCanvas.width, scaleCanvas.height);
+         result = await attempt(scaleCanvas);
+         if (result) return result;
+      }
     }
 
     throw new Error('No barcode detected in the image.');
+  }
+
+  private applyGrayscale(ctx: CanvasRenderingContext2D, width: number, height: number) {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      data[i] = data[i + 1] = data[i + 2] = gray;
+    }
+    ctx.putImageData(imageData, 0, 0);
   }
 
   private applyContrast(ctx: CanvasRenderingContext2D, width: number, height: number) {
@@ -201,13 +248,48 @@ export class BarcodeScannerService {
     const intercept = 128 * (1 - contrast);
     
     for (let i = 0; i < data.length; i += 4) {
-      const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-      let val = gray * contrast + intercept;
+      let val = data[i] * contrast + intercept;
       if (val > 255) val = 255;
       if (val < 0) val = 0;
       data[i] = data[i + 1] = data[i + 2] = val;
     }
     ctx.putImageData(imageData, 0, 0);
+  }
+
+  private applySharpen(ctx: CanvasRenderingContext2D, width: number, height: number) {
+     // A very simple 3x3 convolution kernel for mild sharpening
+     const imageData = ctx.getImageData(0, 0, width, height);
+     const data = imageData.data;
+     const copy = new Uint8ClampedArray(data);
+     const w = width;
+     
+     const kernel = [
+        0, -1,  0,
+       -1,  5, -1,
+        0, -1,  0
+     ];
+
+     for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+           const idx = (y * width + x) * 4;
+           let r = 0, g = 0, b = 0;
+           
+           for (let ky = -1; ky <= 1; ky++) {
+              for (let kx = -1; kx <= 1; kx++) {
+                 const pIdx = ((y + ky) * width + (x + kx)) * 4;
+                 const weight = kernel[(ky + 1) * 3 + (kx + 1)];
+                 r += copy[pIdx] * weight;
+                 g += copy[pIdx + 1] * weight;
+                 b += copy[pIdx + 2] * weight;
+              }
+           }
+           
+           data[idx] = Math.min(255, Math.max(0, r));
+           data[idx + 1] = Math.min(255, Math.max(0, g));
+           data[idx + 2] = Math.min(255, Math.max(0, b));
+        }
+     }
+     ctx.putImageData(imageData, 0, 0);
   }
 
   async decodeFromImage(file: File): Promise<string> {

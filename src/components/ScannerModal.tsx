@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { scannerService, playSuccessBeep, triggerVibration, DebugInfo } from '../lib/scanner';
-import { X, RefreshCw, Keyboard, Camera, Upload, AlertTriangle, CheckCircle, ArrowLeft, Zap, ZoomIn, ZoomOut, Bug, Camera as CameraSwitch, CameraIcon } from 'lucide-react';
+import { X, RefreshCw, Keyboard, Camera, Upload, AlertTriangle, CheckCircle, ArrowLeft, Zap, ZoomIn, ZoomOut, Bug, Camera as CameraSwitch, CameraIcon, FileCheck } from 'lucide-react';
 
 interface ScannerModalProps {
   onDetected: (barcode: string) => void;
@@ -42,6 +42,9 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   const [debugFullFrame, setDebugFullFrame] = useState<string | null>(null);
   const [debugRoiFrame, setDebugRoiFrame] = useState<string | null>(null);
   const [debugCropDetails, setDebugCropDetails] = useState<any>(null);
+
+  // Ref to hold the captured canvases for the test button
+  const capturedCanvasesRef = useRef<{ roi: HTMLCanvasElement, full: HTMLCanvasElement } | null>(null);
 
   useEffect(() => {
     navigator.mediaDevices.enumerateDevices().then(devices => {
@@ -110,6 +113,45 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
      setSelectedCameraId(availableCameras[nextIndex].deviceId);
   };
 
+  // Helper function to turn canvas into a File
+  const canvasToFile = (canvas: HTMLCanvasElement, filename: string): Promise<File> => {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (!blob) return reject(new Error('Canvas to Blob failed'));
+        resolve(new File([blob], filename, { type: 'image/jpeg' }));
+      }, 'image/jpeg', 0.95);
+    });
+  };
+
+  const executeDecodeFlow = async (roiCanvas: HTMLCanvasElement, fullCanvas: HTMLCanvasElement) => {
+    setMode('processing');
+
+    try {
+      // Create a File from the canvas to perfectly mimic the image upload flow
+      const roiFile = await canvasToFile(roiCanvas, 'camera-roi.jpg');
+      
+      let barcode = '';
+      try {
+        // Use EXACT SAME FUNCTION as image upload
+        barcode = await scannerService.decodeFromImage(roiFile);
+      } catch (roiErr) {
+        // Attempt 2: Full frame fallback via exactly the same function
+        const fullFile = await canvasToFile(fullCanvas, 'camera-full.jpg');
+        barcode = await scannerService.decodeFromImage(fullFile);
+      }
+
+      setDetectedBarcode(barcode);
+      if (soundEnabled) playSuccessBeep();
+      if (vibrationEnabled) triggerVibration();
+      setMode('success');
+      
+    } catch (err: any) {
+      console.error('Decode error:', err);
+      setErrorMessage('Barcode not detected. Align the entire barcode inside the box and try again.');
+      setMode('error');
+    }
+  };
+
   const handleCapture = async () => {
     if (!videoRef.current || !roiRef.current) return;
     const video = videoRef.current;
@@ -127,7 +169,6 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     const sourceWidth = video.videoWidth;
     const sourceHeight = video.videoHeight;
 
-    // object-fit: cover mapping
     const scale = Math.max(containerWidth / sourceWidth, containerHeight / sourceHeight);
     
     const renderedWidth = sourceWidth * scale;
@@ -144,9 +185,6 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     let sourceW = roiRect.width / scale;
     let sourceH = roiRect.height / scale;
 
-    // Optional: Account for mirroring (transform: scaleX(-1))
-    // Typically applied to front cameras. For rear camera it is not usually mirrored,
-    // but if it is, we flip X. Assuming no mirroring for environment camera.
     const isMirrored = window.getComputedStyle(video).transform.includes('matrix(-1');
     if (isMirrored) {
        sourceX = sourceWidth - sourceX - sourceW;
@@ -170,7 +208,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     const roiCanvas = document.createElement('canvas');
     roiCanvas.width = Math.round(sourceW);
     roiCanvas.height = Math.round(sourceH);
-    const roiCtx = roiCanvas.getContext('2d');
+    const roiCtx = roiCanvas.getContext('2d', { willReadFrequently: true });
     if (roiCtx) {
        roiCtx.drawImage(
          video, 
@@ -183,18 +221,19 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     const fullCanvas = document.createElement('canvas');
     fullCanvas.width = sourceWidth;
     fullCanvas.height = sourceHeight;
-    const fullCtx = fullCanvas.getContext('2d');
+    const fullCtx = fullCanvas.getContext('2d', { willReadFrequently: true });
     if (fullCtx) {
        fullCtx.drawImage(video, 0, 0);
     }
     
-    const capturedRoiDataUrl = roiCanvas.toDataURL('image/jpeg', 0.9);
+    capturedCanvasesRef.current = { roi: roiCanvas, full: fullCanvas };
+
+    const capturedRoiDataUrl = roiCanvas.toDataURL('image/jpeg', 0.95);
     
     // Display ONLY the captured ROI to user
     setPreviewUrl(capturedRoiDataUrl);
     
-    // Save debug frames
-    setDebugFullFrame(fullCanvas.toDataURL('image/jpeg', 0.9));
+    setDebugFullFrame(fullCanvas.toDataURL('image/jpeg', 0.95));
     setDebugRoiFrame(capturedRoiDataUrl);
     setDebugCropDetails({
        videoDisplay: `${containerWidth.toFixed(0)}x${containerHeight.toFixed(0)}`,
@@ -202,27 +241,12 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
        sourceCrop: `x:${sourceX.toFixed(0)} y:${sourceY.toFixed(0)} w:${sourceW.toFixed(0)} h:${sourceH.toFixed(0)}`
     });
     
-    setMode('processing');
+    executeDecodeFlow(roiCanvas, fullCanvas);
+  };
 
-    try {
-      // Attempt 1: ROI
-      let barcode = '';
-      try {
-        barcode = await scannerService.decodeFromSource(roiCanvas);
-      } catch (roiErr) {
-        // Attempt 2: Full frame fallback
-        barcode = await scannerService.decodeFromSource(fullCanvas);
-      }
-
-      setDetectedBarcode(barcode);
-      if (soundEnabled) playSuccessBeep();
-      if (vibrationEnabled) triggerVibration();
-      setMode('success');
-      
-    } catch (err: any) {
-      console.error('Decode error:', err);
-      setErrorMessage('Barcode not detected. Align the entire barcode inside the box and try again.');
-      setMode('error');
+  const handleTestCapturedImage = () => {
+    if (capturedCanvasesRef.current) {
+      executeDecodeFlow(capturedCanvasesRef.current.roi, capturedCanvasesRef.current.full);
     }
   };
 
@@ -449,9 +473,8 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           
           {debugMode && debugCropDetails && (mode === 'success' || mode === 'error') && (
             <div className="absolute top-0 left-0 right-0 z-40 bg-black/90 text-xs p-3 rounded-b-lg text-green-400 font-mono flex flex-col gap-1 border-b border-slate-700 text-left mb-4">
-              <div className="font-bold border-b border-slate-700 pb-1 mb-1">Debug Info - Crop Mapping</div>
+              <div className="font-bold border-b border-slate-700 pb-1 mb-1">Debug Info - Decoder Stats</div>
               <div>Video Display: {debugCropDetails.videoDisplay}</div>
-              <div>ROI Display: {debugCropDetails.roiDisplay}</div>
               <div>Source Crop: {debugCropDetails.sourceCrop}</div>
               <div>Decoder format: {debugInfo.format || '-'}</div>
               <div>Decoder variant: {debugInfo.variant || '-'}</div>
@@ -465,7 +488,6 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
           {previewUrl && (
             <div className="w-full max-w-sm rounded-2xl overflow-hidden border-2 border-emerald-500/50 mb-6 bg-slate-900/50 shadow-[0_0_30px_rgba(16,185,129,0.15)] flex-shrink-0">
-              {/* Show the cropped image explicitly so the user can verify */}
               <img src={previewUrl} alt="Captured barcode ROI" className={`w-full object-contain bg-black ${mode === 'error' ? 'opacity-60' : ''}`} />
             </div>
           )}
@@ -474,7 +496,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
             <div className="flex flex-col items-center mt-4">
               <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin mb-4" />
               <h3 className="text-lg font-bold text-white mb-1">Processing barcode...</h3>
-              <p className="text-xs text-slate-400 mb-8">Analyzing image</p>
+              <p className="text-xs text-slate-400 mb-8">Analyzing image using CODE128 decoder</p>
             </div>
           ) : mode === 'success' ? (
             <div className="flex flex-col items-center mt-4">
@@ -493,6 +515,16 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
               </div>
               <h3 className="text-xl font-bold text-white mb-2">Barcode not detected</h3>
               <p className="text-xs text-slate-400 mb-6 max-w-xs">{errorMessage}</p>
+              
+              {debugMode && capturedCanvasesRef.current && (
+                <button
+                  onClick={handleTestCapturedImage}
+                  className="mb-4 py-2 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-all flex items-center gap-2"
+                >
+                  <FileCheck className="w-4 h-4" />
+                  Test Captured Image (via Image Upload Decoder)
+                </button>
+              )}
             </div>
           )}
 
