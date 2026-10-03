@@ -28,6 +28,7 @@ export class BarcodeScannerService {
       BarcodeFormat.UPC_E,
       BarcodeFormat.ITF
     ]);
+    hints.set(DecodeHintType.TRY_HARDER, true);
     this.codeReader = new BrowserMultiFormatReader(hints);
   }
 

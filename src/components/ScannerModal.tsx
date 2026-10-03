@@ -118,8 +118,8 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     return new Promise((resolve, reject) => {
       canvas.toBlob((blob) => {
         if (!blob) return reject(new Error('Canvas to Blob failed'));
-        resolve(new File([blob], filename, { type: 'image/jpeg' }));
-      }, 'image/jpeg', 0.95);
+        resolve(new File([blob], filename, { type: 'image/png' }));
+      }, 'image/png');
     });
   };
 
@@ -128,7 +128,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
     try {
       // Create a File from the canvas to perfectly mimic the image upload flow
-      const roiFile = await canvasToFile(roiCanvas, 'camera-roi.jpg');
+      const roiFile = await canvasToFile(roiCanvas, 'camera-roi.png');
       
       let barcode = '';
       try {
@@ -136,7 +136,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         barcode = await scannerService.decodeFromImage(roiFile);
       } catch (roiErr) {
         // Attempt 2: Full frame fallback via exactly the same function
-        const fullFile = await canvasToFile(fullCanvas, 'camera-full.jpg');
+        const fullFile = await canvasToFile(fullCanvas, 'camera-full.png');
         barcode = await scannerService.decodeFromImage(fullFile);
       }
 
@@ -228,12 +228,12 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     
     capturedCanvasesRef.current = { roi: roiCanvas, full: fullCanvas };
 
-    const capturedRoiDataUrl = roiCanvas.toDataURL('image/jpeg', 0.95);
+    const capturedRoiDataUrl = roiCanvas.toDataURL('image/png');
     
     // Display ONLY the captured ROI to user
     setPreviewUrl(capturedRoiDataUrl);
     
-    setDebugFullFrame(fullCanvas.toDataURL('image/jpeg', 0.95));
+    setDebugFullFrame(fullCanvas.toDataURL('image/png'));
     setDebugRoiFrame(capturedRoiDataUrl);
     setDebugCropDetails({
        videoDisplay: `${containerWidth.toFixed(0)}x${containerHeight.toFixed(0)}`,
@@ -517,13 +517,29 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
               <p className="text-xs text-slate-400 mb-6 max-w-xs">{errorMessage}</p>
               
               {debugMode && capturedCanvasesRef.current && (
-                <button
-                  onClick={handleTestCapturedImage}
-                  className="mb-4 py-2 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-all flex items-center gap-2"
-                >
-                  <FileCheck className="w-4 h-4" />
-                  Test Captured Image (via Image Upload Decoder)
-                </button>
+                <div className="flex flex-col gap-2 mb-4 w-full px-4">
+                  <button
+                    onClick={handleTestCapturedImage}
+                    className="py-2 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-all flex items-center justify-center gap-2"
+                  >
+                    <FileCheck className="w-4 h-4" />
+                    Test Captured Image
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (previewUrl) {
+                        const a = document.createElement('a');
+                        a.href = previewUrl;
+                        a.download = 'captured-roi.png';
+                        a.click();
+                      }
+                    }}
+                    className="py-2 px-4 rounded-xl bg-slate-700 hover:bg-slate-600 text-white font-semibold text-xs transition-all flex items-center justify-center gap-2"
+                  >
+                    <Upload className="w-4 h-4" />
+                    Download Capture
+                  </button>
+                </div>
               )}
             </div>
           )}
