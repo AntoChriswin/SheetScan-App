@@ -22,6 +22,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   const [mode, setMode] = useState<ScanMode>('select');
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const roiRef = useRef<HTMLDivElement>(null);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [detectedBarcode, setDetectedBarcode] = useState<string>('');
@@ -40,6 +41,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   // Debug capture states
   const [debugFullFrame, setDebugFullFrame] = useState<string | null>(null);
   const [debugRoiFrame, setDebugRoiFrame] = useState<string | null>(null);
+  const [debugCropDetails, setDebugCropDetails] = useState<any>(null);
 
   useEffect(() => {
     navigator.mediaDevices.enumerateDevices().then(devices => {
@@ -109,7 +111,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   };
 
   const handleCapture = async () => {
-    if (!videoRef.current) return;
+    if (!videoRef.current || !roiRef.current) return;
     const video = videoRef.current;
     
     if (video.videoWidth === 0 || video.videoHeight === 0) {
@@ -117,42 +119,88 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
       return;
     }
 
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
+    const videoRect = video.getBoundingClientRect();
+    const roiRect = roiRef.current.getBoundingClientRect();
+
+    const containerWidth = videoRect.width;
+    const containerHeight = videoRect.height;
+    const sourceWidth = video.videoWidth;
+    const sourceHeight = video.videoHeight;
+
+    // object-fit: cover mapping
+    const scale = Math.max(containerWidth / sourceWidth, containerHeight / sourceHeight);
     
-    // Map ROI (90% width, 20% height, centered) to actual video pixels
-    const roiWidth = Math.floor(vw * 0.9);
-    const roiHeight = Math.floor(vh * 0.2);
-    const startX = Math.floor((vw - roiWidth) / 2);
-    const startY = Math.floor((vh - roiHeight) / 2);
+    const renderedWidth = sourceWidth * scale;
+    const renderedHeight = sourceHeight * scale;
+
+    const offsetX = (renderedWidth - containerWidth) / 2;
+    const offsetY = (renderedHeight - containerHeight) / 2;
+
+    const displayX = roiRect.left - videoRect.left;
+    const displayY = roiRect.top - videoRect.top;
+
+    let sourceX = (displayX + offsetX) / scale;
+    let sourceY = (displayY + offsetY) / scale;
+    let sourceW = roiRect.width / scale;
+    let sourceH = roiRect.height / scale;
+
+    // Optional: Account for mirroring (transform: scaleX(-1))
+    // Typically applied to front cameras. For rear camera it is not usually mirrored,
+    // but if it is, we flip X. Assuming no mirroring for environment camera.
+    const isMirrored = window.getComputedStyle(video).transform.includes('matrix(-1');
+    if (isMirrored) {
+       sourceX = sourceWidth - sourceX - sourceW;
+    }
+
+    // Add 10% padding
+    const paddingX = sourceW * 0.10;
+    const paddingY = sourceH * 0.10;
+    sourceX -= paddingX;
+    sourceY -= paddingY;
+    sourceW += paddingX * 2;
+    sourceH += paddingY * 2;
+
+    // Clamp coordinates
+    sourceX = Math.max(0, sourceX);
+    sourceY = Math.max(0, sourceY);
+    if (sourceX + sourceW > sourceWidth) sourceW = sourceWidth - sourceX;
+    if (sourceY + sourceH > sourceHeight) sourceH = sourceHeight - sourceY;
 
     // 1. Create ROI canvas
     const roiCanvas = document.createElement('canvas');
-    roiCanvas.width = roiWidth;
-    roiCanvas.height = roiHeight;
+    roiCanvas.width = Math.round(sourceW);
+    roiCanvas.height = Math.round(sourceH);
     const roiCtx = roiCanvas.getContext('2d');
     if (roiCtx) {
-       roiCtx.drawImage(video, startX, startY, roiWidth, roiHeight, 0, 0, roiWidth, roiHeight);
+       roiCtx.drawImage(
+         video, 
+         sourceX, sourceY, sourceW, sourceH,
+         0, 0, roiCanvas.width, roiCanvas.height
+       );
     }
 
     // 2. Create Full Frame canvas (for fallback)
     const fullCanvas = document.createElement('canvas');
-    fullCanvas.width = vw;
-    fullCanvas.height = vh;
+    fullCanvas.width = sourceWidth;
+    fullCanvas.height = sourceHeight;
     const fullCtx = fullCanvas.getContext('2d');
     if (fullCtx) {
        fullCtx.drawImage(video, 0, 0);
     }
     
-    // Display captured image to user
-    const capturedDataUrl = fullCanvas.toDataURL('image/jpeg', 0.8);
-    setPreviewUrl(capturedDataUrl);
+    const capturedRoiDataUrl = roiCanvas.toDataURL('image/jpeg', 0.9);
+    
+    // Display ONLY the captured ROI to user
+    setPreviewUrl(capturedRoiDataUrl);
     
     // Save debug frames
-    setDebugFullFrame(capturedDataUrl);
-    if (roiCtx) {
-      setDebugRoiFrame(roiCanvas.toDataURL('image/jpeg', 0.8));
-    }
+    setDebugFullFrame(fullCanvas.toDataURL('image/jpeg', 0.9));
+    setDebugRoiFrame(capturedRoiDataUrl);
+    setDebugCropDetails({
+       videoDisplay: `${containerWidth.toFixed(0)}x${containerHeight.toFixed(0)}`,
+       roiDisplay: `x:${displayX.toFixed(0)} y:${displayY.toFixed(0)} w:${roiRect.width.toFixed(0)} h:${roiRect.height.toFixed(0)}`,
+       sourceCrop: `x:${sourceX.toFixed(0)} y:${sourceY.toFixed(0)} w:${sourceW.toFixed(0)} h:${sourceH.toFixed(0)}`
+    });
     
     setMode('processing');
 
@@ -173,7 +221,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
       
     } catch (err: any) {
       console.error('Decode error:', err);
-      setErrorMessage('Barcode not detected. Make sure the entire barcode is inside the box and try again.');
+      setErrorMessage('Barcode not detected. Align the entire barcode inside the box and try again.');
       setMode('error');
     }
   };
@@ -315,7 +363,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           {debugMode && (
              <div className="absolute top-4 left-4 z-40 bg-black/70 text-xs p-2 rounded text-green-400 font-mono flex flex-col gap-1 max-w-[200px]">
                 <div>Res: {debugInfo.videoWidth}x{debugInfo.videoHeight}</div>
-                <div>ROI: {Math.floor((debugInfo.videoWidth||0)*0.9)}x{Math.floor((debugInfo.videoHeight||0)*0.2)}</div>
+                <div>(Native video coords)</div>
              </div>
           )}
 
@@ -329,7 +377,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
             </div>
 
             {/* Target Box - wide for 1D barcodes */}
-            <div className="relative w-[90%] h-[20%] max-h-48 border-2 border-emerald-500/80 shadow-[0_0_50px_rgba(16,185,129,0.3)] flex items-center justify-center box-border my-6">
+            <div ref={roiRef} className="relative w-[90%] h-[20%] max-h-48 border-2 border-emerald-500/80 shadow-[0_0_50px_rgba(16,185,129,0.3)] flex items-center justify-center box-border my-6">
               <div className="absolute inset-0 backdrop-blur-none bg-transparent" style={{ boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.4)' }}></div>
               <div className="absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 border-emerald-400 z-10" />
               <div className="absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 border-emerald-400 z-10" />
@@ -367,9 +415,9 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           <div className="absolute bottom-8 inset-x-0 flex justify-center z-30 pointer-events-auto">
              <button 
                 onClick={handleCapture}
-                className="w-20 h-20 rounded-full bg-white border-4 border-slate-300 flex items-center justify-center active:scale-95 transition-transform shadow-xl"
+                className="w-20 h-20 rounded-full bg-white border-4 border-slate-300 flex items-center justify-center active:scale-95 transition-transform shadow-xl cursor-pointer"
              >
-                <div className="w-16 h-16 rounded-full bg-emerald-500 flex items-center justify-center shadow-inner">
+                <div className="w-16 h-16 rounded-full bg-emerald-500 flex items-center justify-center shadow-inner pointer-events-none">
                    <CameraIcon className="w-8 h-8 text-white" />
                 </div>
              </button>
@@ -397,53 +445,55 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
       )}
 
       {(mode === 'processing' || mode === 'success' || mode === 'error' || mode === 'detecting') && mode !== 'select' && mode !== 'camera' && (
-        <div className="flex-1 flex flex-col items-center justify-center p-6 max-w-md mx-auto w-full text-center relative">
+        <div className="flex-1 flex flex-col items-center justify-center p-6 max-w-md mx-auto w-full text-center relative overflow-y-auto">
           
-          {debugMode && (mode === 'success' || mode === 'error') && (
-            <div className="absolute top-4 left-4 right-4 z-40 bg-black/80 text-xs p-2 rounded text-green-400 font-mono flex flex-col gap-1 max-h-48 overflow-y-auto border border-slate-700 text-left">
-              <div className="font-bold border-b border-slate-700 pb-1 mb-1">Debug Info</div>
-              <div>Format: {debugInfo.format || '-'}</div>
-              <div>Variant: {debugInfo.variant}</div>
-              <div className="text-red-400">Error: {debugInfo.lastError || '-'}</div>
-              <div className="mt-2 font-bold">ROI Crop:</div>
-              {debugRoiFrame && <img src={debugRoiFrame} className="w-full border border-green-500" alt="roi frame" />}
+          {debugMode && debugCropDetails && (mode === 'success' || mode === 'error') && (
+            <div className="absolute top-0 left-0 right-0 z-40 bg-black/90 text-xs p-3 rounded-b-lg text-green-400 font-mono flex flex-col gap-1 border-b border-slate-700 text-left mb-4">
+              <div className="font-bold border-b border-slate-700 pb-1 mb-1">Debug Info - Crop Mapping</div>
+              <div>Video Display: {debugCropDetails.videoDisplay}</div>
+              <div>ROI Display: {debugCropDetails.roiDisplay}</div>
+              <div>Source Crop: {debugCropDetails.sourceCrop}</div>
+              <div>Decoder format: {debugInfo.format || '-'}</div>
+              <div>Decoder variant: {debugInfo.variant || '-'}</div>
+              <div className="text-red-400 mt-1">Error: {debugInfo.lastError || '-'}</div>
             </div>
           )}
 
+          <div className="mt-8 mb-2 w-full max-w-sm text-center">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Captured Barcode Region</span>
+          </div>
+
           {previewUrl && (
-            <div className="w-64 h-64 rounded-2xl overflow-hidden border border-slate-800 mb-6 bg-slate-900/50 shadow-md relative">
-              <img src={previewUrl} alt="Captured barcode" className={`w-full h-full object-cover ${mode === 'error' ? 'opacity-50' : ''}`} />
-              {/* Overlay target box conceptually on the preview to show what was captured */}
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                 <div className="w-[90%] h-[20%] border border-emerald-500/50"></div>
-              </div>
+            <div className="w-full max-w-sm rounded-2xl overflow-hidden border-2 border-emerald-500/50 mb-6 bg-slate-900/50 shadow-[0_0_30px_rgba(16,185,129,0.15)] flex-shrink-0">
+              {/* Show the cropped image explicitly so the user can verify */}
+              <img src={previewUrl} alt="Captured barcode ROI" className={`w-full object-contain bg-black ${mode === 'error' ? 'opacity-60' : ''}`} />
             </div>
           )}
 
           {mode === 'processing' || mode === 'detecting' ? (
-            <>
+            <div className="flex flex-col items-center mt-4">
               <RefreshCw className="w-8 h-8 text-emerald-400 animate-spin mb-4" />
               <h3 className="text-lg font-bold text-white mb-1">Processing barcode...</h3>
               <p className="text-xs text-slate-400 mb-8">Analyzing image</p>
-            </>
+            </div>
           ) : mode === 'success' ? (
-            <>
+            <div className="flex flex-col items-center mt-4">
               <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center mb-4">
                 <CheckCircle className="w-8 h-8" />
               </div>
               <h3 className="text-xl font-bold text-white mb-2">Barcode Detected</h3>
-              <div className="w-full p-4 rounded-2xl bg-slate-900 border border-slate-800 mb-6">
+              <div className="w-full p-4 rounded-2xl bg-slate-900 border border-slate-800 mb-6 shadow-inner">
                 <span className="font-mono text-xl font-bold text-emerald-400 tracking-wider">{detectedBarcode}</span>
               </div>
-            </>
+            </div>
           ) : (
-            <>
+            <div className="flex flex-col items-center mt-4">
               <div className="w-16 h-16 rounded-2xl bg-rose-500/10 text-rose-400 flex items-center justify-center mb-4">
                 <AlertTriangle className="w-8 h-8" />
               </div>
               <h3 className="text-xl font-bold text-white mb-2">Barcode not detected</h3>
               <p className="text-xs text-slate-400 mb-6 max-w-xs">{errorMessage}</p>
-            </>
+            </div>
           )}
 
           <div className="flex flex-col sm:flex-row gap-3 w-full mt-auto">
