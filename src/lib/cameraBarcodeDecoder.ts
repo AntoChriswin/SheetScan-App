@@ -142,7 +142,7 @@ export async function decodeCapturedBarcode(imageSource: Blob | File | HTMLCanva
         log(`Decoder: ZXing BrowserMultiFormatReader`);
         log(`Attempt: ${passes}`);
         log(`Formats: multiple generic`);
-        const result = await zxingReader.decodeFromCanvas(canvas);
+        const result = zxingReader.decode(canvas);
         if (result) {
           const val = String(result.getText());
           const fmt = result.getBarcodeFormat().toString();
@@ -172,8 +172,14 @@ export async function decodeCapturedBarcode(imageSource: Blob | File | HTMLCanva
         }
       } catch (err: any) {
         // NotFoundException is expected when no more barcodes exist
-        keepScanningVariant = false;
-        log(`Variant ${variant.name} pass ${passes} ended: ${err.message || 'No more barcodes detected.'}`);
+        if (err && err.name === 'NotFoundException') {
+           keepScanningVariant = false;
+           log(`Variant ${variant.name} pass ${passes} ended: No barcode found.`);
+        } else {
+           keepScanningVariant = false;
+           log(`[SheetScan][BarcodeDecoder] ZXing error: ${err.message || err.toString()}`);
+           console.error('[SheetScan][BarcodeDecoder] ZXing error:', err);
+        }
       }
     }
 

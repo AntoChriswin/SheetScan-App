@@ -145,7 +145,7 @@ export class BarcodeScannerService {
   async decodeFromSource(source: HTMLImageElement | HTMLCanvasElement): Promise<string> {
     const attempt = async (canvas: HTMLCanvasElement): Promise<string | null> => {
       try {
-        const result = await this.codeReader.decodeFromCanvas(canvas);
+        const result = this.codeReader.decode(canvas);
         if (result) {
           let text = result.getText().trim();
           if (text) {
@@ -153,9 +153,12 @@ export class BarcodeScannerService {
              return text;
           }
         }
-      } catch (err) {
-        if (!(err instanceof NotFoundException)) {
-          this.updateDebug({ lastError: err.toString() });
+      } catch (err: any) {
+        if (err && err.name === 'NotFoundException') {
+           // Normal - barcode not found in this variant
+        } else {
+          console.error('[SheetScan][BarcodeDecoder] ZXing error:', err);
+          this.updateDebug({ lastError: err.message || err.toString() });
         }
       }
       return null;
