@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { scannerService, playSuccessBeep, triggerVibration } from '../lib/scanner';
-import { X, RefreshCw, Keyboard, Camera, Upload, AlertTriangle, CheckCircle, ArrowLeft } from 'lucide-react';
+import { scannerService, playSuccessBeep, triggerVibration, DebugInfo } from '../lib/scanner';
+import { X, RefreshCw, Keyboard, Camera, Upload, AlertTriangle, CheckCircle, ArrowLeft, Zap, ZoomIn, ZoomOut, Bug, Camera as CameraSwitch } from 'lucide-react';
 
 interface ScannerModalProps {
   onDetected: (barcode: string) => void;
@@ -27,10 +27,37 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   const [detectedBarcode, setDetectedBarcode] = useState<string>('');
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
-  const startCamera = async () => {
+  // Camera UI states
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchEnabled, setTorchEnabled] = useState(false);
+  const [zoomSupported, setZoomSupported] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [debugMode, setDebugMode] = useState(false);
+  const [debugInfo, setDebugInfo] = useState<Partial<DebugInfo>>({});
+  const [capturedFrame, setCapturedFrame] = useState<string | null>(null);
+  const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
+  const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Check available cameras
+    navigator.mediaDevices.enumerateDevices().then(devices => {
+       const cameras = devices.filter(d => d.kind === 'videoinput');
+       setAvailableCameras(cameras);
+    }).catch(() => {});
+  }, []);
+
+  const checkCapabilities = () => {
+    const caps = scannerService.getCapabilities();
+    if (caps) {
+      setTorchSupported(!!(caps as any).torch);
+      setZoomSupported(!!(caps as any).zoom);
+    }
+  };
+
+  const startCamera = async (cameraId?: string) => {
     setErrorMessage(null);
     if (!videoRef.current) {
-      setTimeout(() => startCamera(), 100);
+      setTimeout(() => startCamera(cameraId), 100);
       return;
     }
 
@@ -40,14 +67,19 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         (barcodeText) => {
           if (soundEnabled) playSuccessBeep();
           if (vibrationEnabled) triggerVibration();
-          scannerService.stop();
-          onDetected(barcodeText);
+          setDetectedBarcode(barcodeText);
+          setMode('success');
         },
         (err) => {
           console.error('Scanner error:', err);
           setErrorMessage('Camera access was denied or is unavailable on this device. Please check your browser permissions.');
-        }
+        },
+        cameraId
       );
+      
+      // Allow time for capabilities to be populated
+      setTimeout(checkCapabilities, 500);
+
     } catch (err: any) {
       console.error('Failed to start camera:', err);
       setErrorMessage(err.message || 'Camera is unavailable or permission denied.');
@@ -56,11 +88,15 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
   useEffect(() => {
     if (mode === 'camera') {
-      startCamera();
+      startCamera(selectedCameraId || undefined);
+      scannerService.onDebugUpdate = setDebugInfo;
+      scannerService.onCapturedFrame = setCapturedFrame;
     } else {
       scannerService.stop();
+      scannerService.onDebugUpdate = null;
+      scannerService.onCapturedFrame = null;
     }
-  }, [mode]);
+  }, [mode, selectedCameraId]);
 
   useEffect(() => {
     return () => {
@@ -68,6 +104,25 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
   }, [previewUrl]);
+
+  const handleTorchToggle = async () => {
+    const newState = !torchEnabled;
+    const success = await scannerService.setTorch(newState);
+    if (success) setTorchEnabled(newState);
+  };
+
+  const handleZoom = async (delta: number) => {
+    const newZoom = Math.max(1, Math.min(10, zoomLevel + delta));
+    const success = await scannerService.setZoom(newZoom);
+    if (success) setZoomLevel(newZoom);
+  };
+  
+  const handleCameraSwitch = () => {
+     if (availableCameras.length < 2) return;
+     const currentIndex = availableCameras.findIndex(c => c.deviceId === selectedCameraId);
+     const nextIndex = (currentIndex + 1) % availableCameras.length;
+     setSelectedCameraId(availableCameras[nextIndex].deviceId);
+  };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -103,17 +158,10 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-slate-950 text-white animate-fade-in">
-      {/* Hidden file input */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={handleFileChange}
-      />
+      <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
 
       {/* Header */}
-      <div className="flex items-center justify-between p-4 bg-slate-900/80 border-b border-slate-800 backdrop-blur-md">
+      <div className="flex items-center justify-between p-4 bg-slate-900/80 border-b border-slate-800 backdrop-blur-md z-20">
         <div className="flex items-center gap-2">
           {mode === 'camera' || mode === 'detecting' || mode === 'success' || mode === 'error' ? (
             <button
@@ -131,21 +179,27 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           <Camera className="w-5 h-5 text-emerald-400" />
           <h2 className="font-bold text-base">Scan Barcode</h2>
         </div>
-        <button
-          onClick={() => {
-            scannerService.stop();
-            if (previewUrl) URL.revokeObjectURL(previewUrl);
-            onClose();
-          }}
-          className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-        >
-          <X className="w-6 h-6" />
-        </button>
+        <div className="flex items-center gap-2">
+          {mode === 'camera' && (
+             <button onClick={() => setDebugMode(!debugMode)} className={`p-2 rounded-lg transition-colors ${debugMode ? 'text-emerald-400 bg-slate-800' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}>
+                <Bug className="w-5 h-5" />
+             </button>
+          )}
+          <button
+            onClick={() => {
+              scannerService.stop();
+              if (previewUrl) URL.revokeObjectURL(previewUrl);
+              onClose();
+            }}
+            className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+          >
+            <X className="w-6 h-6" />
+          </button>
+        </div>
       </div>
 
-      {/* Main Content Area */}
       {mode === 'select' && (
-        <div className="flex-1 flex flex-col items-center justify-center p-6 max-w-md mx-auto w-full">
+        <div className="flex-1 flex flex-col items-center justify-center p-6 max-w-md mx-auto w-full z-10">
           <div className="text-center mb-8">
             <h3 className="text-2xl font-bold tracking-tight mb-2">Choose Scanning Method</h3>
             <p className="text-sm text-slate-400">Scan using your device camera or upload a barcode image.</p>
@@ -190,25 +244,77 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
       )}
 
       {mode === 'camera' && (
-        <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
+        <div className="relative flex-1 bg-black flex flex-col items-center justify-center overflow-hidden">
           <video
             ref={videoRef}
             className="absolute inset-0 w-full h-full object-cover"
             muted
             playsInline
           />
+          
+          {/* Debug Overlay */}
+          {debugMode && (
+             <div className="absolute top-4 left-4 z-40 bg-black/70 text-xs p-2 rounded text-green-400 font-mono flex flex-col gap-1 max-w-[200px]">
+                <div>Res: {debugInfo.videoWidth}x{debugInfo.videoHeight}</div>
+                <div>ROI: {debugInfo.roiWidth}x{debugInfo.roiHeight}</div>
+                <div>FPS: {debugInfo.fps}</div>
+                <div>Variant: {debugInfo.variant}</div>
+                <div>Format: {debugInfo.format || '-'}</div>
+                <div className="break-all">Last Success: {debugInfo.lastSuccess}</div>
+                <div className="text-red-400 break-all">Error: {debugInfo.lastError}</div>
+                {capturedFrame && (
+                   <img src={capturedFrame} className="mt-2 w-full border border-green-500" alt="frame" />
+                )}
+             </div>
+          )}
 
-          {/* Scan overlay target box */}
-          <div className="relative z-10 w-72 h-48 border-2 border-emerald-500 rounded-2xl shadow-[0_0_50px_rgba(16,185,129,0.3)] flex items-center justify-center pointer-events-none">
-            <div className="absolute inset-x-0 top-1/2 h-0.5 bg-emerald-500/80 animate-pulse" />
-            <div className="absolute -top-3 -left-3 w-6 h-6 border-t-4 border-l-4 border-emerald-400 rounded-tl-lg" />
-            <div className="absolute -top-3 -right-3 w-6 h-6 border-t-4 border-r-4 border-emerald-400 rounded-tr-lg" />
-            <div className="absolute -bottom-3 -left-3 w-6 h-6 border-b-4 border-l-4 border-emerald-400 rounded-bl-lg" />
-            <div className="absolute -bottom-3 -right-3 w-6 h-6 border-b-4 border-r-4 border-emerald-400 rounded-br-lg" />
+          {/* Scanner Guide Overlay */}
+          <div className="absolute inset-0 pointer-events-none z-10 bg-black/40 flex flex-col items-center justify-center">
+            {/* Guide Text */}
+            <div className="absolute top-20 bg-black/60 px-4 py-2 rounded-full text-sm font-semibold tracking-wide">
+              Position the entire barcode inside the box
+            </div>
+
+            {/* Target Box - extremely wide for 1D barcodes */}
+            <div className="relative w-[90%] h-[20%] max-h-48 border-2 border-emerald-500/80 shadow-[0_0_50px_rgba(16,185,129,0.3)] flex items-center justify-center box-border">
+              {/* Cutout (clear center) */}
+              <div className="absolute inset-0 backdrop-blur-none bg-transparent" style={{ boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.5)' }}></div>
+              
+              <div className="absolute inset-x-0 top-1/2 h-0.5 bg-emerald-500/80 animate-pulse z-10" />
+              <div className="absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 border-emerald-400 z-10" />
+              <div className="absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 border-emerald-400 z-10" />
+              <div className="absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 border-emerald-400 z-10" />
+              <div className="absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 border-emerald-400 z-10" />
+            </div>
+            
+            <div className="absolute bottom-32 bg-black/60 px-4 py-2 rounded-full text-xs text-emerald-400 animate-pulse font-bold tracking-widest">
+              SCANNING...
+            </div>
+          </div>
+
+          {/* Camera Controls Overlay */}
+          <div className="absolute bottom-20 right-4 z-20 flex flex-col gap-4">
+             {torchSupported && (
+               <button onClick={handleTorchToggle} className={`p-3 rounded-full shadow-lg transition-colors ${torchEnabled ? 'bg-yellow-500 text-black' : 'bg-slate-800/80 text-white'}`}>
+                  <Zap className="w-6 h-6" />
+               </button>
+             )}
+             {zoomSupported && (
+               <div className="flex flex-col gap-2 bg-slate-800/80 p-2 rounded-full shadow-lg">
+                  <button onClick={() => handleZoom(0.5)} className="p-2 hover:text-emerald-400 transition-colors"><ZoomIn className="w-5 h-5" /></button>
+                  <div className="text-center text-xs font-bold">{zoomLevel.toFixed(1)}x</div>
+                  <button onClick={() => handleZoom(-0.5)} className="p-2 hover:text-emerald-400 transition-colors"><ZoomOut className="w-5 h-5" /></button>
+               </div>
+             )}
+             {availableCameras.length > 1 && (
+               <button onClick={handleCameraSwitch} className="p-3 bg-slate-800/80 rounded-full shadow-lg text-white hover:text-emerald-400 transition-colors">
+                 <CameraSwitch className="w-6 h-6" />
+               </button>
+             )}
           </div>
 
           {errorMessage && (
-            <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
+            <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-30">
               <div className="w-16 h-16 rounded-2xl bg-rose-500/10 text-rose-400 flex items-center justify-center mb-4">
                 <AlertTriangle className="w-8 h-8" />
               </div>
@@ -217,7 +323,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
               <div className="flex flex-col sm:flex-row gap-3 w-full max-w-xs">
                 <button
-                  onClick={startCamera}
+                  onClick={() => startCamera(selectedCameraId || undefined)}
                   className="py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm transition-all"
                 >
                   Try Again
@@ -278,13 +384,16 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
               }}
               className="flex-1 py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm transition-all shadow-lg shadow-emerald-500/10 cursor-pointer"
             >
-              Use Barcode
+              ✓ Confirm / Continue
             </button>
             <button
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                 setMode('select');
+                 setDetectedBarcode('');
+              }}
               className="flex-1 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-sm transition-all border border-slate-700 cursor-pointer"
             >
-              Scan Another Image
+              Scan Another
             </button>
           </div>
         </div>
@@ -319,24 +428,6 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
               Use Camera
             </button>
           </div>
-        </div>
-      )}
-
-      {/* Footer bar for camera mode */}
-      {mode === 'camera' && (
-        <div className="p-6 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between backdrop-blur-md">
-          <p className="text-xs text-slate-400">Align barcode within the target box to scan automatically.</p>
-          <button
-            onClick={() => {
-              scannerService.stop();
-              onClose();
-              onOpenManualEntry();
-            }}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-sm transition-colors border border-slate-700 cursor-pointer"
-          >
-            <Keyboard className="w-4 h-4" />
-            <span>Manual Entry</span>
-          </button>
         </div>
       )}
     </div>
