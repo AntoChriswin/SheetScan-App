@@ -6,32 +6,16 @@ export interface DebugInfo {
   roiWidth: number;
   roiHeight: number;
   format: string;
-  fps: number;
   variant: string;
   lastError: string;
-  lastSuccess: string;
 }
 
 export class BarcodeScannerService {
   private codeReader: BrowserMultiFormatReader;
-  private isScanning = false;
   private stream: MediaStream | null = null;
-  private processingInterval: any = null;
-  private isProcessingFrame = false;
-  
-  private consecutiveMatches = 0;
-  private lastMatchedBarcode: string | null = null;
   
   public onDebugUpdate: ((info: Partial<DebugInfo>) => void) | null = null;
-  public onCapturedFrame: ((dataUrl: string) => void) | null = null;
-  
-  private debugStats: Partial<DebugInfo> = {
-    fps: 0,
-    lastError: 'None',
-    lastSuccess: 'None'
-  };
-  private framesProcessed = 0;
-  private lastFpsTime = Date.now();
+  private debugStats: Partial<DebugInfo> = {};
 
   constructor() {
     const hints = new Map();
@@ -47,214 +31,58 @@ export class BarcodeScannerService {
     this.codeReader = new BrowserMultiFormatReader(hints);
   }
 
-  async start(
+  async startCamera(
     videoElement: HTMLVideoElement,
-    onDetected: (resultText: string) => void,
-    onError?: (err: any) => void,
     preferredCameraId?: string | null
   ): Promise<void> {
-    if (this.isScanning) {
-      this.stop();
-    }
+    this.stop();
 
-    this.isScanning = true;
-    this.consecutiveMatches = 0;
-    this.lastMatchedBarcode = null;
-    this.framesProcessed = 0;
-    this.lastFpsTime = Date.now();
-
-    try {
-      let selectedDeviceId = preferredCameraId;
-      if (!selectedDeviceId) {
-        try {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const videoDevices = devices.filter((d: MediaDeviceInfo) => d.kind === 'videoinput');
-          const backCamera = videoDevices.find((d: MediaDeviceInfo) =>
-            d.label.toLowerCase().includes('back') ||
-            d.label.toLowerCase().includes('rear') ||
-            d.label.toLowerCase().includes('environment')
-          );
-          selectedDeviceId = backCamera ? backCamera.deviceId : (videoDevices[0]?.deviceId || null);
-        } catch (e) {
-          // Fallback
-        }
-      }
-
-      const constraints: MediaStreamConstraints = {
-        video: selectedDeviceId 
-          ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-          : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-      };
-
-      this.stream = await navigator.mediaDevices.getUserMedia(constraints);
-      videoElement.srcObject = this.stream;
-      
-      // Attempt autofocus if available
+    let selectedDeviceId = preferredCameraId;
+    if (!selectedDeviceId) {
       try {
-         const track = this.stream.getVideoTracks()[0];
-         const capabilities = track.getCapabilities?.();
-         if (capabilities && (capabilities as any).focusMode) {
-             await track.applyConstraints({
-                 advanced: [{ focusMode: 'continuous' } as any]
-             });
-         }
-      } catch (e) {}
-      
-      // Wait for video to be ready
-      await new Promise<void>((resolve) => {
-        videoElement.onloadedmetadata = () => {
-          videoElement.play();
-          resolve();
-        };
-      });
-
-      this.updateDebug({
-        videoWidth: videoElement.videoWidth,
-        videoHeight: videoElement.videoHeight,
-      });
-
-      // Frame processing loop, roughly 5-10 FPS
-      this.processingInterval = setInterval(() => {
-        this.processFrame(videoElement, onDetected);
-      }, 150);
-
-    } catch (error) {
-      this.isScanning = false;
-      if (onError) onError(error);
-      throw error;
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter((d: MediaDeviceInfo) => d.kind === 'videoinput');
+        const backCamera = videoDevices.find((d: MediaDeviceInfo) =>
+          d.label.toLowerCase().includes('back') ||
+          d.label.toLowerCase().includes('rear') ||
+          d.label.toLowerCase().includes('environment')
+        );
+        selectedDeviceId = backCamera ? backCamera.deviceId : (videoDevices[0]?.deviceId || null);
+      } catch (e) {
+        // Fallback
+      }
     }
-  }
 
-  private async processFrame(videoElement: HTMLVideoElement, onDetected: (resultText: string) => void) {
-    if (!this.isScanning || this.isProcessingFrame || videoElement.videoWidth === 0) return;
-    
-    this.isProcessingFrame = true;
+    const constraints: MediaStreamConstraints = {
+      video: selectedDeviceId 
+        ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+    };
+
+    this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+    videoElement.srcObject = this.stream;
     
     try {
-      const vw = videoElement.videoWidth;
-      const vh = videoElement.videoHeight;
-      
-      // ROI: 90% width, 20% height, centered
-      const roiWidth = Math.floor(vw * 0.9);
-      const roiHeight = Math.floor(vh * 0.2);
-      const startX = Math.floor((vw - roiWidth) / 2);
-      const startY = Math.floor((vh - roiHeight) / 2);
-
-      this.updateDebug({ roiWidth, roiHeight });
-
-      const canvas = document.createElement('canvas');
-      canvas.width = roiWidth;
-      canvas.height = roiHeight;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) {
-        this.isProcessingFrame = false;
-        return;
-      }
-
-      // Draw ROI
-      ctx.drawImage(videoElement, startX, startY, roiWidth, roiHeight, 0, 0, roiWidth, roiHeight);
-
-      // We attempt to decode variants
-      let decodedText: string | null = null;
-      
-      // Variant A: Original
-      this.updateDebug({ variant: 'Original' });
-      decodedText = await this.attemptDecode(canvas);
-
-      if (!decodedText) {
-        // Variant B: Grayscale & Contrast
-        this.updateDebug({ variant: 'Grayscale & Contrast' });
-        this.applyContrast(ctx, roiWidth, roiHeight);
-        decodedText = await this.attemptDecode(canvas);
-      }
-      
-      if (!decodedText) {
-        // Variant C: Upscaled (1.5x)
-        this.updateDebug({ variant: 'Upscaled (1.5x)' });
-        const scaleCanvas = document.createElement('canvas');
-        scaleCanvas.width = roiWidth * 1.5;
-        scaleCanvas.height = roiHeight * 1.5;
-        const scaleCtx = scaleCanvas.getContext('2d');
-        if (scaleCtx) {
-           scaleCtx.drawImage(canvas, 0, 0, roiWidth, roiHeight, 0, 0, scaleCanvas.width, scaleCanvas.height);
-           decodedText = await this.attemptDecode(scaleCanvas);
-        }
-      }
-
-      if (this.onCapturedFrame && decodedText) {
-         this.onCapturedFrame(canvas.toDataURL('image/jpeg', 0.8));
-      }
-
-      // Track FPS
-      this.framesProcessed++;
-      const now = Date.now();
-      if (now - this.lastFpsTime >= 1000) {
-         this.updateDebug({ fps: this.framesProcessed });
-         this.framesProcessed = 0;
-         this.lastFpsTime = now;
-      }
-
-      if (decodedText) {
-        this.updateDebug({ lastSuccess: decodedText });
-        if (decodedText === this.lastMatchedBarcode) {
-          this.consecutiveMatches++;
-        } else {
-          this.consecutiveMatches = 1;
-          this.lastMatchedBarcode = decodedText;
-        }
-
-        // Temporal stability: require 2 consecutive matches
-        if (this.consecutiveMatches >= 2) {
-          this.stop();
-          onDetected(decodedText);
-        }
-      } else {
-         // reset
-         this.consecutiveMatches = 0;
-      }
-
-    } catch (err: any) {
-       this.updateDebug({ lastError: err.message || "Unknown error" });
-    } finally {
-      this.isProcessingFrame = false;
-    }
-  }
-
-  private async attemptDecode(canvas: HTMLCanvasElement): Promise<string | null> {
-    try {
-      const result = await this.codeReader.decodeFromCanvas(canvas);
-      if (result) {
-        // Validate result
-        let text = result.getText().trim();
-        if (text) {
-           this.updateDebug({ format: result.getBarcodeFormat().toString() });
-           return text;
-        }
-      }
-    } catch (err) {
-      if (!(err instanceof NotFoundException)) {
-        this.updateDebug({ lastError: err.toString() });
-      }
-    }
-    return null;
-  }
-
-  private applyContrast(ctx: CanvasRenderingContext2D, width: number, height: number) {
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
-    const contrast = 1.5; // contrast factor
-    const intercept = 128 * (1 - contrast);
+       const track = this.stream.getVideoTracks()[0];
+       const capabilities = track.getCapabilities?.();
+       if (capabilities && (capabilities as any).focusMode) {
+           await track.applyConstraints({
+               advanced: [{ focusMode: 'continuous' } as any]
+           });
+       }
+    } catch (e) {}
     
-    for (let i = 0; i < data.length; i += 4) {
-      // Grayscale
-      const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-      // Contrast
-      let val = gray * contrast + intercept;
-      if (val > 255) val = 255;
-      if (val < 0) val = 0;
-      data[i] = data[i + 1] = data[i + 2] = val;
-    }
-    ctx.putImageData(imageData, 0, 0);
+    await new Promise<void>((resolve) => {
+      videoElement.onloadedmetadata = () => {
+        videoElement.play();
+        resolve();
+      };
+    });
+
+    this.updateDebug({
+      videoWidth: videoElement.videoWidth,
+      videoHeight: videoElement.videoHeight,
+    });
   }
 
   private updateDebug(info: Partial<DebugInfo>) {
@@ -303,12 +131,6 @@ export class BarcodeScannerService {
   }
 
   stop(): void {
-    this.isScanning = false;
-    this.isProcessingFrame = false;
-    if (this.processingInterval) {
-      clearInterval(this.processingInterval);
-      this.processingInterval = null;
-    }
     if (this.stream) {
       this.stream.getTracks().forEach(track => track.stop());
       this.stream = null;
@@ -318,6 +140,76 @@ export class BarcodeScannerService {
     } catch (e) {}
   }
 
+  // Refactored shared decoding function
+  async decodeFromSource(source: HTMLImageElement | HTMLCanvasElement): Promise<string> {
+    const attempt = async (canvas: HTMLCanvasElement): Promise<string | null> => {
+      try {
+        const result = await this.codeReader.decodeFromCanvas(canvas);
+        if (result) {
+          let text = result.getText().trim();
+          if (text) {
+             this.updateDebug({ format: result.getBarcodeFormat().toString() });
+             return text;
+          }
+        }
+      } catch (err) {
+        if (!(err instanceof NotFoundException)) {
+          this.updateDebug({ lastError: err.toString() });
+        }
+      }
+      return null;
+    };
+
+    // Ensure we are working with a canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('Could not create canvas context');
+    ctx.drawImage(source, 0, 0);
+
+    // Variant A: Original
+    this.updateDebug({ variant: 'Original' });
+    let result = await attempt(canvas);
+    if (result) return result;
+
+    // Variant B: Grayscale & Contrast
+    this.updateDebug({ variant: 'Grayscale & Contrast' });
+    this.applyContrast(ctx, canvas.width, canvas.height);
+    result = await attempt(canvas);
+    if (result) return result;
+    
+    // Variant C: Upscaled (1.5x)
+    this.updateDebug({ variant: 'Upscaled (1.5x)' });
+    const scaleCanvas = document.createElement('canvas');
+    scaleCanvas.width = source.width * 1.5;
+    scaleCanvas.height = source.height * 1.5;
+    const scaleCtx = scaleCanvas.getContext('2d');
+    if (scaleCtx) {
+       scaleCtx.drawImage(source, 0, 0, source.width, source.height, 0, 0, scaleCanvas.width, scaleCanvas.height);
+       result = await attempt(scaleCanvas);
+       if (result) return result;
+    }
+
+    throw new Error('No barcode detected in the image.');
+  }
+
+  private applyContrast(ctx: CanvasRenderingContext2D, width: number, height: number) {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    const contrast = 1.5;
+    const intercept = 128 * (1 - contrast);
+    
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      let val = gray * contrast + intercept;
+      if (val > 255) val = 255;
+      if (val < 0) val = 0;
+      data[i] = data[i + 1] = data[i + 2] = val;
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }
+
   async decodeFromImage(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -325,25 +217,10 @@ export class BarcodeScannerService {
         const img = new Image();
         img.onload = async () => {
           try {
-            // Re-use the exact same decoding logic for images
-            const canvas = document.createElement('canvas');
-            canvas.width = img.width;
-            canvas.height = img.height;
-            const ctx = canvas.getContext('2d');
-            if (ctx) ctx.drawImage(img, 0, 0);
-            
-            let result = await this.attemptDecode(canvas);
-            if (result) {
-               resolve(result);
-            } else {
-               // Try with contrast
-               if(ctx) this.applyContrast(ctx, img.width, img.height);
-               result = await this.attemptDecode(canvas);
-               if(result) resolve(result);
-               else reject(new Error('No barcode detected in the image.'));
-            }
+            const result = await this.decodeFromSource(img);
+            resolve(result);
           } catch (err) {
-            reject(new Error('No barcode detected in the image.'));
+            reject(err);
           }
         };
         img.onerror = () => reject(new Error('Unable to load this image.'));
