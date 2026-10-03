@@ -12,10 +12,24 @@ export interface DecoderResponse {
   debugLog: string[];
 }
 
+const supportedFormats = [
+  BarcodeFormat.CODE_128,
+  BarcodeFormat.CODE_39,
+  BarcodeFormat.EAN_13,
+  BarcodeFormat.EAN_8,
+  BarcodeFormat.UPC_A,
+  BarcodeFormat.UPC_E,
+  BarcodeFormat.ITF,
+  BarcodeFormat.QR_CODE,
+  BarcodeFormat.DATA_MATRIX,
+  BarcodeFormat.PDF_417,
+  BarcodeFormat.AZTEC
+];
+
 // Ensure the new decoder is completely isolated
 const zxingReader = new BrowserMultiFormatReader(
   new Map([
-    [DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.CODE_128]],
+    [DecodeHintType.POSSIBLE_FORMATS, supportedFormats],
     [DecodeHintType.TRY_HARDER, true],
     [DecodeHintType.RETURN_CODABAR_START_END, false]
   ])
@@ -29,29 +43,55 @@ const zxingReader = new BrowserMultiFormatReader(
 export async function decodeCapturedBarcode(imageSource: Blob | File | HTMLCanvasElement): Promise<DecoderResponse> {
   const debugLog: string[] = [];
   const log = (msg: string) => {
-    console.log(`[CameraDecoder] ${msg}`);
+    console.log(`[SheetScan][CameraDecoder] ${msg}`);
     debugLog.push(msg);
   };
 
   log('Starting isolated camera barcode decoder');
 
+  let sizeStr = 'N/A';
+  let mimeStr = 'N/A';
+  let sourceType = imageSource instanceof Blob ? (imageSource instanceof File ? 'File' : 'Blob') : 'HTMLCanvasElement';
+
+  if (imageSource instanceof Blob) {
+    mimeStr = imageSource.type;
+    sizeStr = `${imageSource.size} bytes`;
+  } else if (imageSource instanceof HTMLCanvasElement) {
+    const blob = await new Promise<Blob | null>(resolve => imageSource.toBlob(resolve, 'image/png'));
+    if (blob) {
+      mimeStr = blob.type;
+      sizeStr = `${blob.size} bytes`;
+    }
+  }
+
+  log(`source type: ${sourceType}`);
+  log(`Image MIME: ${mimeStr}`);
+  log(`Image size: ${sizeStr}`);
+
   // Convert input to an HTMLImageElement to standardise processing
   const img = await sourceToImage(imageSource);
-  log(`Input image dimensions: ${img.naturalWidth}x${img.naturalHeight}`);
+  log(`ROI width: ${img.naturalWidth}`);
+  log(`ROI height: ${img.naturalHeight}`);
 
   let results: BarcodeResult[] = [];
 
   // Attempt 1: Native BarcodeDetector API (Extremely fast, natively supports multiple barcodes)
   if ('BarcodeDetector' in window) {
     try {
-      const barcodeDetector = new (window as any).BarcodeDetector({ formats: ['code_128'] });
-      log('Native BarcodeDetector available, attempting decode...');
+      let nativeFormats: string[] = [];
+      try {
+        nativeFormats = await (window as any).BarcodeDetector.getSupportedFormats();
+      } catch(e) {}
+      
+      const formatsToUse = nativeFormats.length > 0 ? nativeFormats : ['code_128', 'code_39', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'itf', 'qr_code', 'data_matrix', 'pdf417', 'aztec'];
+      const barcodeDetector = new (window as any).BarcodeDetector({ formats: formatsToUse });
+      log(`Native BarcodeDetector available, attempting decode with formats: ${formatsToUse.join(', ')}...`);
       const detected = await barcodeDetector.detect(img);
       
       if (detected && detected.length > 0) {
         log(`Native BarcodeDetector found ${detected.length} barcodes!`);
         results = detected.map((d: any) => ({
-          value: d.rawValue,
+          value: String(d.rawValue),
           format: d.format.toUpperCase()
         }));
         
@@ -69,13 +109,12 @@ export async function decodeCapturedBarcode(imageSource: Blob | File | HTMLCanva
   // Attempt 2: ZXing Pipeline with Image Preprocessing and Multiple Barcode Extraction
   // We use the "blackout" trick to find multiple barcodes using a single-barcode reader.
   const variants = [
-    { name: 'Original', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => {} },
-    { name: 'Grayscale', processor: applyGrayscale },
-    { name: 'Contrast Enhanced', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => { applyGrayscale(ctx, w, h); applyContrast(ctx, w, h); } },
-    { name: 'Sharpened', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => { applyGrayscale(ctx, w, h); applySharpen(ctx, w, h); } },
-    { name: '2x Upscale', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => {}, scale: 2 },
-    { name: '2x Upscale + Contrast', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => { applyGrayscale(ctx, w, h); applyContrast(ctx, w, h); }, scale: 2 },
-    { name: 'Adaptive Threshold', processor: applyThreshold }
+    { name: 'Original ROI', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => {} },
+    { name: 'Upscaled ROI', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => {}, scale: 2 },
+    { name: 'Grayscale ROI', processor: applyGrayscale },
+    { name: 'High-contrast ROI', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => { applyGrayscale(ctx, w, h); applyContrast(ctx, w, h); } },
+    { name: 'Sharpened ROI', processor: (ctx: CanvasRenderingContext2D, w: number, h: number) => { applyGrayscale(ctx, w, h); applySharpen(ctx, w, h); } },
+    { name: 'Appropriate threshold/binarized ROI', processor: applyThreshold }
   ];
 
   const foundValues = new Set<string>();
@@ -100,13 +139,17 @@ export async function decodeCapturedBarcode(imageSource: Blob | File | HTMLCanva
     while (keepScanningVariant && passes < 3) {
       passes++;
       try {
+        log(`Decoder: ZXing BrowserMultiFormatReader`);
+        log(`Attempt: ${passes}`);
+        log(`Formats: multiple generic`);
         const result = await zxingReader.decodeFromCanvas(canvas);
         if (result) {
-          const val = result.getText();
+          const val = String(result.getText());
+          const fmt = result.getBarcodeFormat().toString();
           if (!foundValues.has(val)) {
             foundValues.add(val);
-            results.push({ value: val, format: result.getBarcodeFormat().toString() });
-            log(`Success! Found CODE128: ${val}`);
+            results.push({ value: val, format: fmt });
+            log(`Success! Result: ${val} Format: ${fmt}`);
           } else {
              log(`Found duplicate barcode: ${val}`);
           }
@@ -127,10 +170,10 @@ export async function decodeCapturedBarcode(imageSource: Blob | File | HTMLCanva
              keepScanningVariant = false; // Cannot blackout accurately, break loop
           }
         }
-      } catch (err) {
+      } catch (err: any) {
         // NotFoundException is expected when no more barcodes exist
         keepScanningVariant = false;
-        log(`Variant ${variant.name} pass ${passes} ended: No more barcodes detected.`);
+        log(`Variant ${variant.name} pass ${passes} ended: ${err.message || 'No more barcodes detected.'}`);
       }
     }
 
