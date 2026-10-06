@@ -32,6 +32,7 @@ import { PendingChangesBar } from './components/PendingChangesBar';
 import { ScanHistoryView } from './components/ScanHistoryView';
 import { SettingsView } from './components/SettingsView';
 import { ToastContainer, ToastMessage } from './components/Toast';
+import { ZxingDiagnostic } from './components/ZxingDiagnostic';
 
 const DEFAULT_CONFIG: ScannerConfig = {
   barcodeColumn: 'E',
@@ -90,6 +91,7 @@ export default function App() {
   const [pendingScans, setPendingScans] = useState<PendingScan[]>([]);
   const [isSavingBatch, setIsSavingBatch] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [showDiagnostic, setShowDiagnostic] = useState(false);
 
   const addToast = (type: 'success' | 'error' | 'info', message: string, details?: string) => {
     const newToast: ToastMessage = {
@@ -580,6 +582,26 @@ export default function App() {
         onSaveBatch={handleSaveBatch}
         isSaving={isSavingBatch}
       />
+
+      {/* Floating Diagnostic Toggle */}
+      <button 
+        onClick={() => setShowDiagnostic(true)}
+        style={{ position: 'fixed', bottom: 20, right: 20, zIndex: 9000, background: 'red', color: 'white', padding: '10px' }}
+      >
+        Run Diagnostic
+      </button>
+
+      {showDiagnostic && (
+        <>
+          <ZxingDiagnostic />
+          <button 
+            onClick={() => setShowDiagnostic(false)}
+            style={{ position: 'fixed', top: 20, right: 20, zIndex: 10000, background: 'red', color: 'white', padding: '10px' }}
+          >
+            Close Diagnostic
+          </button>
+        </>
+      )}
     </div>
   );
 }
