@@ -1,4 +1,4 @@
-import { BrowserMultiFormatReader, NotFoundException, DecodeHintType, BarcodeFormat } from '@zxing/library';
+import { BrowserMultiFormatReader, NotFoundException, DecodeHintType, BarcodeFormat, HTMLCanvasElementLuminanceSource, HybridBinarizer, BinaryBitmap } from '@zxing/library';
 
 export interface DebugInfo {
   videoWidth: number;
@@ -145,7 +145,10 @@ export class BarcodeScannerService {
   async decodeFromSource(source: HTMLImageElement | HTMLCanvasElement): Promise<string> {
     const attempt = async (canvas: HTMLCanvasElement): Promise<string | null> => {
       try {
-        const result = this.codeReader.decode(canvas);
+        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+        const hybridBinarizer = new HybridBinarizer(luminanceSource);
+        const bitmap = new BinaryBitmap(hybridBinarizer);
+        const result = this.codeReader.decodeBitmap(bitmap);
         if (result) {
           let text = result.getText().trim();
           if (text) {

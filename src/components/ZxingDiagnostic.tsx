@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { BrowserMultiFormatReader, DecodeHintType, BarcodeFormat } from '@zxing/library';
+import { BrowserMultiFormatReader, DecodeHintType, BarcodeFormat, HTMLCanvasElementLuminanceSource, HybridBinarizer, BinaryBitmap } from '@zxing/library';
 import { decodeCapturedBarcode } from '../lib/cameraBarcodeDecoder';
 
 export function ZxingDiagnostic() {
@@ -60,8 +60,10 @@ export function ZxingDiagnostic() {
           ]));
           
           log(`[ZXING_BROWSER_TEST]`);
-          log(`decode() called: YES`);
-          const result = reader.decode(canvas);
+          log(`decode called: YES`);
+          const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+          const bitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+          const result = reader.decodeBitmap(bitmap);
           log(`result: ${result ? 'FOUND' : 'null'}`);
           if (result) {
             log(`decoded text: ${result.getText()}`);
@@ -111,7 +113,9 @@ export function ZxingDiagnostic() {
         try {
           const reader = new BrowserMultiFormatReader();
           log(`decode called: YES`);
-          const result = reader.decode(canvas);
+          const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+          const bitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+          const result = reader.decodeBitmap(bitmap);
           log(`result: ${result ? 'FOUND' : 'null'}`);
           if (result) {
             log(`decoded text: ${result.getText()}`);
@@ -168,7 +172,9 @@ export function ZxingDiagnostic() {
             try {
               const reader = new BrowserMultiFormatReader();
               log(`decode called: YES`);
-              const result = reader.decode(roiCanvas);
+              const luminanceSource = new HTMLCanvasElementLuminanceSource(roiCanvas);
+              const bitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+              const result = reader.decodeBitmap(bitmap);
               log(`result: ${result ? 'FOUND' : 'null'}`);
               if (result) {
                 log(`decoded text: ${result.getText()}`);

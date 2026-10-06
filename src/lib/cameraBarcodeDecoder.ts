@@ -1,4 +1,4 @@
-import { BrowserMultiFormatReader, DecodeHintType, BarcodeFormat } from '@zxing/library';
+import { BrowserMultiFormatReader, DecodeHintType, BarcodeFormat, HTMLCanvasElementLuminanceSource, HybridBinarizer, BinaryBitmap } from '@zxing/library';
 
 export interface BarcodeResult {
   value: string;
@@ -142,7 +142,10 @@ export async function decodeCapturedBarcode(imageSource: Blob | File | HTMLCanva
         log(`Decoder: ZXing BrowserMultiFormatReader`);
         log(`Attempt: ${passes}`);
         log(`Formats: multiple generic`);
-        const result = zxingReader.decode(canvas);
+        const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas);
+        const hybridBinarizer = new HybridBinarizer(luminanceSource);
+        const bitmap = new BinaryBitmap(hybridBinarizer);
+        const result = zxingReader.decodeBitmap(bitmap);
         if (result) {
           const val = String(result.getText());
           const fmt = result.getBarcodeFormat().toString();
